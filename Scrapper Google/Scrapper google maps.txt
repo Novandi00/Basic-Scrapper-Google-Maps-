@@ -1,0 +1,223 @@
+/**
+ * 🚀 GOOGLE MAPS ULTIMATE SCRAPER (CONSOLE EDITION)
+ * Arquitectura: POOP (Prototype Oriented)
+ * Autor: CEO Architecture
+ * Entorno: Browser Console (Chrome/Edge)
+ */
+
+class GMapScraper {
+    constructor() {
+        this.config = {
+            scrollDelay: 2500,    // Tiempo de espera entre scrolls (ms)
+            maxScrolls: 50,       // Límite de seguridad para no scrollear infinito
+            minRating: 0.0,       // Filtro mínimo de estrellas
+            exportFileName: `Leads_Maps_${new Date().toISOString().slice(0,10)}.csv`
+        };
+        
+        this.data = [];
+        this.scrolledCount = 0;
+        this.isScanning = false;
+        
+        // Selectores de DOM (Google cambia esto a menudo, usamos atributos estables)
+        this.selectors = {
+            feed: 'div[role="feed"]',
+            article: 'div[role="article"]',
+            link: 'a[href*="/maps/place/"]',
+            rating: 'span[role="img"]',
+            websiteBtn: 'a[data-value="Sitio web"]', // Selector común para botón web
+            phoneBtn: 'button[data-item-id^="phone:"]' // A veces aparece, a veces está en texto
+        };
+    }
+
+    /**
+     * Inicia el proceso de Scrapping
+     */
+    async init() {
+        console.clear();
+        console.log("%c 🚀 INICIANDO PROTOCOLO DE EXTRACCIÓN ", "background: #222; color: #bada55; font-size: 14px");
+        
+        const feed = document.querySelector(this.selectors.feed);
+        if (!feed) {
+            console.error("❌ Error Crítico: No encuentro la lista de resultados. Asegúrate de haber buscado algo y tener la lista a la izquierda.");
+            return;
+        }
+
+        this.isScanning = true;
+        await this.scrollLoop(feed);
+        
+        console.log("%c ✅ SCROLL FINALIZADO. PROCESANDO DATOS... ", "background: #0000FF; color: #FFF");
+        this.extractData();
+        
+        console.log(`%c 📊 TOTAL LEADS ENCONTRADOS: ${this.data.length} `, "font-weight: bold; font-size: 16px");
+        this.downloadCSV();
+    }
+
+    /**
+     * Bucle de Scroll con esperas aleatorias (Human behavior simulation)
+     */
+    async scrollLoop(feedElement) {
+        let previousHeight = 0;
+        let stagnated = 0;
+
+        while (this.scrolledCount < this.config.maxScrolls) {
+            // Scroll al final
+            feedElement.scrollTop = feedElement.scrollHeight;
+            previousHeight = feedElement.scrollHeight;
+
+            // Espera aleatoria (Rate Limiting Simulado)
+            let randomWait = this.config.scrollDelay + Math.floor(Math.random() * 1000);
+            console.log(`⬇️ Scroll ${this.scrolledCount + 1}/${this.config.maxScrolls} - Esperando ${randomWait}ms...`);
+            await this.sleep(randomWait);
+
+            // Verificar si cargaron nuevos elementos
+            let newHeight = feedElement.scrollHeight;
+            
+            // Detección de fin de lista (End of List Detection)
+            if (newHeight === previousHeight) {
+                stagnated++;
+                // Si intentamos bajar 3 veces y no crece, asumimos fin.
+                if (stagnated >= 3) {
+                    console.log("🛑 Fin de la lista detectado.");
+                    break;
+                }
+            } else {
+                stagnated = 0;
+            }
+            
+            this.scrolledCount++;
+            
+            // Checkeo de final de página por texto de Google (opcional)
+            if (document.body.innerText.includes("Has llegado al final de la lista")) {
+                console.log("🛑 Google indica fin de lista.");
+                break;
+            }
+        }
+    }
+
+    /**
+     * Extractor de Datos Estructurado
+     */
+    extractData() {
+        const listings = document.querySelectorAll(this.selectors.article);
+        
+        listings.forEach(node => {
+            try {
+                // 1. Nombre
+                let linkNode = node.querySelector(this.selectors.link);
+                let name = linkNode ? linkNode.getAttribute('aria-label') : "Desconocido";
+                let mapsLink = linkNode ? linkNode.href : "";
+
+                // 2. Rating y Reviews (Parsing Regex)
+                let ratingNode = node.querySelector(this.selectors.rating);
+                let rawRating = ratingNode ? ratingNode.getAttribute('aria-label') : ""; 
+                // Ej: "4.5 estrellas 20 reseñas"
+                let rating = "0";
+                let reviews = "0";
+                
+                if (rawRating) {
+                    let ratingMatch = rawRating.match(/([\d,\.]+)\sestrellas/);
+                    let reviewMatch = rawRating.match(/([\d,\.]+)\sreseñas/); // Ajustar según idioma del browser
+                    if (!reviewMatch) reviewMatch = rawRating.match(/([\d,\.]+)\sreviews/);
+
+                    rating = ratingMatch ? ratingMatch[1].replace(',','.') : "0";
+                    reviews = reviewMatch ? reviewMatch[1].replace('.','').replace(',','') : "0"; // Remove thousand separators
+                }
+
+                // 3. Web & Telefono (Heurística de atributos)
+                let allLinks = node.querySelectorAll('a');
+                let webUrl = "NO_WEB";
+                let phone = "NO_PHONE";
+                let hasWeb = "NO";
+
+                allLinks.forEach(a => {
+                    let val = a.getAttribute('data-value');
+                    let href = a.href || "";
+                    let label = a.getAttribute('aria-label') || "";
+
+                    // Detección de Web
+                    if (val === "Sitio web" || (href.startsWith("http") && !href.includes("google") && !href.includes("maps"))) {
+                        webUrl = href;
+                        hasWeb = "SI";
+                    }
+                    
+                    // Detección de Teléfono (a veces está en el texto visible del nodo, otras en botones ocultos)
+                    // En la vista de lista, el teléfono es difícil de sacar sin entrar al detalle.
+                    // Intentamos buscar patrones en el texto del nodo completo.
+                });
+
+                // Extracción de Texto Crudo para buscar teléfonos/patrones
+                let textContent = node.innerText;
+                // Regex simple para teléfonos argentinos (adaptable)
+                let phoneMatch = textContent.match(/(\+\d{2,3}\s?[\d\s-]{8,})/);
+                if (phoneMatch) phone = phoneMatch[0];
+
+                // FILTRO DE CALIDAD (User Requirements)
+                // Si el rating es menor al config, saltar.
+                if (parseFloat(rating) < this.config.minRating) return;
+
+                this.data.push({
+                    name: this.clean(name),
+                    rating: rating,
+                    reviews: reviews,
+                    hasWeb: hasWeb,
+                    webUrl: this.clean(webUrl),
+                    phone: this.clean(phone),
+                    mapsLink: this.clean(mapsLink)
+                });
+
+            } catch (e) {
+                console.warn("⚠️ Error parseando un nodo:", e);
+            }
+        });
+    }
+
+    /**
+     * Utilidad de limpieza CSV
+     */
+    clean(text) {
+        if (!text) return "";
+        return text.toString().replace(/"/g, '""').replace(/\n/g, " ").trim();
+    }
+
+    /**
+     * Generador de Delay
+     */
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Exportación a CSV
+     */
+    downloadCSV() {
+        if (this.data.length === 0) {
+            console.log("⚠️ No hay datos para exportar.");
+            return;
+        }
+
+        // Headers
+        let csvContent = "Nombre,Rating,Reseñas,Tiene_Web,Link_Web,Telefono_Posible,Link_Maps\n";
+        
+        // Rows
+        this.data.forEach(row => {
+            csvContent += `"${row.name}","${row.rating}","${row.reviews}","${row.hasWeb}","${row.webUrl}","${row.phone}","${row.mapsLink}"\n`;
+        });
+
+        // Blob Creation
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute("download", this.config.exportFileName);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        console.log(`%c 💾 ARCHIVO DESCARGADO: ${this.config.exportFileName} `, "background: green; color: white; font-size: 14px");
+    }
+}
+
+// --- EJECUCIÓN ---
+// Instanciar y correr
+const scraper = new GMapScraper();
+scraper.init();
